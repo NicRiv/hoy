@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-amd64
+            cc: gcc
+          - os: ubuntu-latest
+            target: linux-arm64
+            cc: aarch64-linux-gnu-gcc
+            apt: gcc-aarch64-linux-gnu
+          - os: windows-latest
+            target: windows-amd64
+            cc: cl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross compiler
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Build (Unix)
+        if: matrix.cc != 'cl'
+        run: |
+          mkdir -p dist
+          ${{ matrix.cc }} -O2 -Wall -Wextra -static \
+              -o dist/hoy-${{ matrix.target }} src/hoy.c
+
+      - name: Build (MSVC)
+        if: matrix.cc == 'cl'
+        shell: cmd
+        run: |
+          cl /O2 /W4 /Fe:dist\hoy-${{ matrix.target }}.exe src\hoy.c
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoy-${{ matrix.target }}
+          path: dist/*
+
+  package-deb:
+    name: Package .deb
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hoy-linux-*
+          path: bins
+
+      - name: Build .deb packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          for arch in amd64 arm64; do
+            pkgdir="pkg/hoy_${VERSION}_${arch}"
+            mkdir -p "$pkgdir/DEBIAN" "$pkgdir/usr/bin"
+            cp "bins/hoy-linux-${arch}/hoy-linux-${arch}" \
+               "$pkgdir/usr/bin/hoy"
+            chmod 755 "$pkgdir/usr/bin/hoy"
+
+            cat > "$pkgdir/DEBIAN/control" <<EOF
+          Package: hoy
+          Version: ${VERSION}
+          Architecture: ${arch}
+          Maintainer: NicRiv <nicriv.dev@gmail.com>
+          Section: utils
+          Priority: optional
+          Homepage: https://github.com/${GITHUB_REPOSITORY}
+          Description: Crea una carpeta con la fecha de hoy
+           Crea un directorio con nombre DDMMYY (por ejemplo 211125)
+           e imprime su nombre por stdout.
+          EOF
+
+            dpkg-deb --root-owner-group --build "$pkgdir" \
+                     "out/hoy_${VERSION}_${arch}.deb"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-packages
+          path: out/*.deb
+
+  release:
+    name: Publish release
+    needs: [build, package-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS
+          ls -la
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

@@ -1,0 +1,9 @@
+*.exe
+hoy.sh
+hoy
+*.o
+*.deb
+dist/
+pkg/
+out/
+bins/
